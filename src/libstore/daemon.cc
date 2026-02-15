@@ -743,6 +743,8 @@ static void performOp(
         GCResults results;
 
         logger->startWork();
+        if (!trusted)
+            throw Error("you are not privileged to collect garbage");
         if (options.ignoreLiveness)
             throw Error("you are not allowed to ignore liveness");
         auto & gcStore = require<GcStore>(*store);
