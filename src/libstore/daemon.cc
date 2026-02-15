@@ -18,6 +18,7 @@
 #include "nix/util/git.hh"
 #include "nix/util/logging.hh"
 #include "nix/store/globals.hh"
+#include "nix/util/config-global.hh"
 
 #ifndef _WIN32 // TODO need graceful async exit support on Windows?
 #  include "nix/util/monitor-fd.hh"
@@ -26,6 +27,35 @@
 #include <sstream>
 
 namespace nix::daemon {
+
+struct DaemonSettings : Config
+{
+    Setting<bool> unlistableStore{
+        this,
+        false,
+        "unlistable-store",
+        R"(
+          If set to `true`, users that are not in
+          [`trusted-users`](#conf-trusted-users) cannot enumerate store
+          contents.  Operations that list or discover store paths the
+          caller does not already know — such as querying all valid
+          paths, querying referrers, or finding GC roots — will be
+          denied.
+
+          This is intended for multi-tenant systems where a shared Nix
+          store is used and tenants should not be able to discover each
+          other's build outputs.  Combine with removing read permission
+          on the store directory (e.g. `chmod o-r /nix/store`) to also
+          prevent filesystem-level enumeration.
+
+          Note that "oracle" queries — checking whether a specific,
+          already-known store path is valid — are still permitted.
+        )"};
+};
+
+static DaemonSettings daemonSettings;
+
+static GlobalConfig::Register rDaemonSettings(&daemonSettings);
 
 Sink & operator<<(Sink & sink, const Logger::Fields & fields)
 {
@@ -365,6 +395,9 @@ static void performOp(
     case WorkerProto::Op::QueryDerivationOutputs: {
         auto path = WorkerProto::Serialise<StorePath>::read(*store, rconn);
         logger->startWork();
+        if (!trusted && daemonSettings.unlistableStore
+            && (op == WorkerProto::Op::QueryReferrers || op == WorkerProto::Op::QueryValidDerivers))
+            throw Error("you are not privileged to enumerate store paths");
         StorePathSet paths;
         if (op == WorkerProto::Op::QueryReferrers)
             store->queryReferrers(path, paths);
@@ -711,6 +744,8 @@ static void performOp(
 
     case WorkerProto::Op::FindRoots: {
         logger->startWork();
+        if (!trusted && daemonSettings.unlistableStore)
+            throw Error("you are not privileged to enumerate store paths");
         auto & gcStore = require<GcStore>(*store);
         Roots roots = gcStore.findRoots(!trusted);
         logger->stopWork();
@@ -833,6 +868,8 @@ static void performOp(
 
     case WorkerProto::Op::QueryAllValidPaths: {
         logger->startWork();
+        if (!trusted && daemonSettings.unlistableStore)
+            throw Error("you are not privileged to enumerate store paths");
         auto paths = store->queryAllValidPaths();
         logger->stopWork();
         WorkerProto::write(*store, wconn, paths);
